@@ -12,7 +12,7 @@ frida got killed or the app respawned clean. blackdex was the right idea since i
 
 ## the idea that worked
 
-run the app under redroid, which is real android in a container, not an emulator, so it gets past the emulator checks. the part that matters is that a container process is just a normal linux process on the host. so from the host i can read /proc/<pid>/mem directly. that is outside the android sandbox. no frida, no ptrace, nothing for iJiami to notice. it cannot defend against a reader it cannot see.
+built darkdex and ran the app under redroid, which is real android in a container, not an emulator, so it gets past the emulator checks. the part that matters is that a container process is just a normal linux process on the host. so from the host i can read /proc/<pid>/mem directly. that is outside the android sandbox. no frida, no ptrace, nothing for iJiami to notice. it cannot defend against a reader it cannot see.
 
 so i let the app run until the classes load and the packer has pushed everything into ram, then i read the memory from the host and carve the dex out.
 
