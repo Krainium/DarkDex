@@ -1,0 +1,9 @@
+<resources>
+    <color name="dd_bg">#0A0A0E</color>
+    <color name="dd_accent">#FFB300</color>
+    <style name="DarkDexTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/dd_bg</item>
+        <item name="android:statusBarColor">@color/dd_bg</item>
+        <item name="android:navigationBarColor">@color/dd_bg</item>
+    </style>
+</resources>
