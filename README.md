@@ -1,6 +1,6 @@
 # 🟣 DarkDex
 
-> ⚡ powerful tool to bypass ijiami 4th gen.
+> ⚡ powerful tool to bypass ijiami 4th gen and other packers.
 
 🧬 DarkDex pulls the real dex out of packed android apps. it reads the running app memory and rebuilds the dex even when the header is wiped, so it works on ijiami including the 4th gen vmp, other packers, and plain apps too.
 
