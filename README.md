@@ -1,14 +1,25 @@
 # 🟣 DarkDex
 
-> ⚡ powerful tool to bypass ijiami 4th Gen.
+> ⚡ powerful tool to bypass ijiami 4th gen.
 
-🧬 DarkDex pulls the real dex out of packed android apps. it reads the running app memory and rebuilds the dex even when the header is wiped, so it works on iJiami including the 4th gen vmp, other packers, and plain apps too.
+🧬 DarkDex pulls the real dex out of packed android apps. it reads the running app memory and rebuilds the dex even when the header is wiped, so it works on ijiami including the 4th gen vmp, other packers, and plain apps too.
 
 it comes in two parts.
 
 🖥️ darkdex.sh runs on a redroid host. it reads the target process memory from outside the android sandbox, so nothing inside the app can spot it.
 
 📱 darkdex.apk runs on the phone or emulator itself. root mode does a full memory dump. no root mode pulls the on disk dex.
+
+## 🆕 v2: event driven capture
+
+v1 took one memory snapshot. v2 adds four things, all still from **outside** the sandbox (invisible to ijiami anti debug). full writeup in [V2.md](V2.md).
+
+- ⚡ **release tracer** (`native/darkdex_trace.bt` + `darkdex_grab`). kernel probes (bpftrace uprobes) on ART's `DexFileLoader::OpenCommon` and `ClassLinker::DefineClass`. grabs every decrypted dex the instant ART opens it, **before the header gets wiped**, across the packer's **respawns**, plus a live class map. against real ijiami 4th gen this pulled the app dex at **9,605 classes** and baksmali disassembled all of it clean.
+- 🧭 **artwalk** (`darkdex_artwalk`). recovers dex from live `art::DexFile` heap objects (exact `begin_/size_`) even when the header **and** map_list are wiped.
+- 🧩 **real cdex to dex** (`cdex_to_dex`). expands CompactDex code items to standard layout so dumps actually decompile (v1 only stamped the magic).
+- ✅ **dexval** (`host/dexval.py`). validates, dedups, ranks, and smoke tests disassembly. winners land in `dumps/<pkg>/best/`.
+
+one shot: `./host/darkdex.sh com.some.app --baksmali`  (needs `bpftrace` on the host).
 
 ## 📥 setup
 
@@ -100,4 +111,4 @@ the full writeup is in ijiami.md.
 
 ## 🎓 for educational use
 
-use it only on apps you own or are allowed to test. for research and learning.
+> for research and learning.
