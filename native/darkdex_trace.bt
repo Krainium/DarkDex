@@ -1,0 +1,52 @@
+#!/usr/bin/env bpftrace
+/*
+ * darkdex v2 — JIT-release tracer (kernel-side, sandbox-invisible)
+ *
+ * v1 took ONE memory snapshot and carved/recovered dex from it. That misses two
+ * things modern packers (iJiami 4th-gen, and Chinese jiagu families) rely on:
+ *   1. anti-scan header wiping  — the packer hands ART a valid dex, lets it map,
+ *      then zeroes/fakes the header in RAM so a later scan finds garbage.
+ *   2. just-in-time class release — code is decrypted per-class right before use,
+ *      so a single snapshot only contains what has already run.
+ *
+ * This tracer sets uprobes on the ART dex-open path from the HOST kernel. It runs
+ * outside the Android sandbox (no ptrace, no frida, no in-process hook), so the
+ * packer's anti-debug can't see it — same threat model as reading /proc/mem, but
+ * event-driven, so it catches every dex at the exact instant ART receives it,
+ * BEFORE the header is wiped, and every class as it is defined.
+ *
+ * Hooks (Android 11 ART; symbols resolved by offset/name in darkdex.sh):
+ *   DexFileLoader::OpenCommon(base, size, ...)      -> arg0=base  arg1=size
+ *   CompactDexFile::CompactDexFile(this,base,size)  -> arg1=base  arg2=size
+ *   ClassLinker::DefineClass(this,thr,descriptor,.) -> arg2=descriptor
+ *
+ * Placeholders @LIBDEX@ @LIBART@ @COMM@ are filled by host/darkdex.sh.
+ * Events are consumed by darkdex_grab, which reads /proc/<pid>/mem at (base,size)
+ * and writes a clean dex — capturing it while it is still valid.
+ */
+
+/* NB: no BEGIN probe — on some redroid-host kernels bpftrace's BEGIN uses a
+ * uprobe on /proc/self/exe:BEGIN_trigger that fails to resolve and aborts the
+ * whole script. NB: no comm/pid predicate either — ART loads dex on worker
+ * threads (comm != package) and iJiami respawns the app with new pids under its
+ * anti-debug, so any static thread/pid filter drops events. We capture every ART
+ * dex-open on the host and let darkdex_grab keep only the target by checking each
+ * pid's /proc/<pid>/cmdline. @LIBDEX@ @LIBART@ are filled by host/darkdex.sh. */
+
+/* every dex opened from a memory buffer (incl. packer-decrypted, before wipe) */
+uprobe:@LIBDEX@:_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg0, (uint64)arg1);
+}
+
+/* CompactDex specifically (cdex001) — begin/size in arg1/arg2 (this in arg0) */
+uprobe:@LIBDEX@:_ZN3art14CompactDexFileC2EPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISG_EEEE
+{
+  printf("CDEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
+/* every class as ART defines it — catches lazily released code, gives a live class map */
+uprobe:@LIBART@:_ZN3art11ClassLinker11DefineClassEPNS_6ThreadEPKcmNS_6HandleINS_6mirror11ClassLoaderEEERKNS_7DexFileERKNS_3dex8ClassDefE
+{
+  printf("CLASS pid=%d name=%s\n", pid, str(arg2));
+}
