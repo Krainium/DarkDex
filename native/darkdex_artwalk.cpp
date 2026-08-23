@@ -7,15 +7,23 @@
 //
 // This walks the heap for those objects and dumps each dex by its object-recorded
 // bounds — so even a fully header+maplist-wiped dex comes out with correct size.
-// Layout (Android 11, arm64, art::DexFile has a vtable so offset 0 is the vptr):
-//   +0x00 vtable*  (points into libdexfile.so / libart.so)
-//   +0x08 begin_        (const uint8_t*)
-//   +0x10 size_         (size_t)
-//   +0x18 data_begin_   (const uint8_t*)
-//   +0x20 data_size_    (size_t)
-// We confirm a candidate by: vptr lands in an executable lib mapping, begin_
-// points at a readable page whose dex/cdex signature OR endian tag is present (or
-// even if wiped, size_ is sane and begin_+size_ stays inside one region).
+//
+// Layouts (arm64, art::DexFile — vtable at offset 0):
+//
+//   Android 11:                      Android 14:
+//   +0x00 vtable*                    +0x00 vtable*
+//   +0x08 begin_                     +0x08 begin_
+//   +0x10 size_                      +0x10 size_
+//   +0x18 data_begin_                +0x18 data_begin_
+//   +0x20 data_size_                 +0x20 data_size_
+//                                    +0x28 container_ (shared_ptr, 16 bytes)
+//                                    +0x38 location_  (string, 24–32 bytes)
+//
+// The first 5 fields are identical across 11–14. The difference is in fields
+// AFTER data_size_ which we don't read — so one scan covers both versions.
+// Confirmation: vtable in libart/libdexfile code, begin_ in readable memory,
+// dex/cdex magic or endian tag present, size_ sane. Cross-region reads handle
+// dex that spans multiple mmap regions.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -50,9 +58,20 @@ static std::vector<Region> maps(int pid){
 static bool in_readable(const std::vector<Region>&R,uint64_t a,uint64_t need){
     for(auto&r:R) if(r.r && a>=r.s && a+need<=r.e) return true; return false;
 }
+static bool spans_readable(const std::vector<Region>&R,uint64_t a,uint64_t need){
+    if(in_readable(R,a,need)) return true;
+    uint64_t end=a+need; uint64_t cur=a;
+    for(auto&r:R){
+        if(!r.r) continue;
+        if(r.s>cur) return false;
+        if(r.s<=cur && r.e>cur){ cur=r.e; if(cur>=end) return true; }
+    }
+    return false;
+}
 static bool in_libcode(const std::vector<Region>&R,uint64_t a){
     for(auto&r:R) if(r.x && a>=r.s && a<r.e &&
-        (r.tag.find("libdexfile.so")!=std::string::npos||r.tag.find("libart.so")!=std::string::npos)) return true;
+        (r.tag.find("libdexfile.so")!=std::string::npos||r.tag.find("libart.so")!=std::string::npos||
+         r.tag.find("libdexfile_external.so")!=std::string::npos)) return true;
     return false;
 }
 
@@ -85,7 +104,7 @@ int main(int argc,char**argv){
             if(size<0x70||size>256ULL*1024*1024) continue;
             if(!in_libcode(R,vptr)) continue;                 // vtable must be in libart/libdexfile
             if(!in_readable(R,begin,0x70)) continue;
-            if(!in_readable(R,begin,size)) continue;          // whole dex inside one region
+            if(!spans_readable(R,begin,size)) continue;       // dex may span multiple regions
             if(dumped.count(begin)) continue;
 
             uint8_t hdr[0x70]; if(!rd(begin,hdr,0x70)) continue;
@@ -95,7 +114,15 @@ int main(int argc,char**argv){
             bool plausible = sig || tag || (fsz>0x70 && fsz<=size+0x10000);
             if(!plausible) continue;
 
-            std::vector<uint8_t> dex(size); if(!rd(begin,dex.data(),size)) continue;
+            // cross-region read: pread handles contiguous VA even across mmap boundaries
+            std::vector<uint8_t> dex(size);
+            size_t got=0; uint64_t addr=begin;
+            while(got<size){
+                ssize_t rd2=pread(fd,dex.data()+got,size-got,(off_t)addr);
+                if(rd2<=0) break;
+                got+=rd2; addr+=rd2;
+            }
+            if(got<size) continue;
             bool is_cdex = !memcmp(dex.data(),"cdex",4) || (*(const uint32_t*)(dex.data()+36)!=0x70 && !sig);
             if(memcmp(dex.data(),"dex\n",4) && memcmp(dex.data(),"cdex",4))
                 memcpy(dex.data(), is_cdex?"cdex001\0":"dex\n035\0", 8);

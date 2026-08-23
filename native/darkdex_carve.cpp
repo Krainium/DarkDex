@@ -74,8 +74,27 @@ int main(int argc,char**argv){
         for(size_t i=0;i+0x70<=(size_t)n;i+=4){
             if(*(uint32_t*)(buf.data()+i+40)!=0x12345678u) continue;
             uint32_t dsz=blob_size(buf.data()+i,n-i);
-            if(!dsz||i+dsz>(size_t)n) continue;
-            uint8_t* blob=buf.data()+i;
+            if(!dsz) continue;
+
+            // cross-region read: dex file_size may exceed the current mmap region
+            std::vector<uint8_t> xbuf;
+            uint8_t* blob;
+            if(i+dsz>(size_t)n){
+                xbuf.resize(dsz);
+                memcpy(xbuf.data(),buf.data()+i,n-i);
+                size_t got=n-i;
+                uint64_t addr=r.start+n;
+                while(got<dsz){
+                    ssize_t rd=pread(memfd,xbuf.data()+got,dsz-got,(off_t)addr);
+                    if(rd<=0) break;
+                    got+=rd; addr+=rd;
+                }
+                if(got<dsz) continue;
+                blob=xbuf.data();
+            } else {
+                blob=buf.data()+i;
+            }
+
             bool is_cdex=(memcmp(blob,CDEX_MAGIC,4)==0)||(*(uint32_t*)(blob+36)!=0x70);
 
             std::string key=std::to_string(dsz)+":"; key.append((char*)blob+12,16);
@@ -84,11 +103,12 @@ int main(int argc,char**argv){
             if(memcmp(blob,DEX_MAGIC,4)!=0 && memcmp(blob,CDEX_MAGIC,4)!=0){
                 if(is_cdex) memcpy(blob,"cdex001",7); else memcpy(blob,"dex\n035",7);
             }
+            bool xregion=!xbuf.empty();
             char op[640]; snprintf(op,sizeof op,"%s/carve_%02d_%llx_%s.dex",outdir,found,
                 (unsigned long long)(r.start+i),is_cdex?"cdex":"dex");
             FILE* o=fopen(op,"wb"); if(o){ fwrite(blob,1,dsz,o); fclose(o);
-                printf("[+] %-4s @ %012llx  size %8u  region[%s]  -> %s\n",is_cdex?"cdex":"dex",
-                    (unsigned long long)(r.start+i),dsz,r.tag.c_str(),op); found++; }
+                printf("[+] %-4s @ %012llx  size %8u  region[%s]%s  -> %s\n",is_cdex?"cdex":"dex",
+                    (unsigned long long)(r.start+i),dsz,r.tag.c_str(),xregion?" (cross-region)":"",op); found++; }
             i+=dsz-4;
         }
     }
