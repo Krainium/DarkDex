@@ -80,7 +80,7 @@ fi
 
 # --- launch (fresh, so the packer re-decrypts under the tracer) ---
 ACT=$($ADB shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$PKG" 2>/dev/null | tail -1 | tr -d '\r')
-launch(){ [ -n "$ACT" ] && $ADB shell am start -n "$ACT" >/dev/null 2>&1;
+launch(){ [ -n "$ACT" ] && $ADB shell am start -n "$ACT" >/dev/null 2>&1 && return;
           $ADB shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; }
 rss_of(){ $ADB shell cat /proc/"$1"/status 2>/dev/null | awk '/VmRSS/{print $2}' | tr -dc '0-9'; }
 
