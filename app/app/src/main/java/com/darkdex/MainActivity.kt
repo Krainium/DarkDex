@@ -69,18 +69,28 @@ class MainActivity : AppCompatActivity() {
     }
     private fun names(list:List<ApplicationInfo>) = list.map { "${pm.getApplicationLabel(it)}\n${it.packageName}" }
 
+    private var suStyle = "magisk"
     private fun findSu(): List<String>? {
         suCmd?.let { return it }
         for (prov in suProviders) {
             try {
                 val p = Runtime.getRuntime().exec((prov + listOf("-c", "id")).toTypedArray())
                 val o = p.inputStream.bufferedReader().readText(); p.waitFor()
-                if (o.contains("uid=0")) { suCmd = prov; return prov }
+                if (o.contains("uid=0")) { suCmd = prov; suStyle = "magisk"; return prov }
+            } catch (_: Exception) {}
+            try {
+                val p = Runtime.getRuntime().exec((prov + listOf("0", "id")).toTypedArray())
+                val o = p.inputStream.bufferedReader().readText(); p.waitFor()
+                if (o.contains("uid=0")) { suCmd = prov; suStyle = "toybox"; return prov }
             } catch (_: Exception) {}
         }
         return null
     }
-    private fun runSu(cmd: String): Process = Runtime.getRuntime().exec(((suCmd ?: listOf("su")) + listOf("-c", cmd)).toTypedArray())
+    private fun runSu(cmd: String): Process {
+        val su = suCmd ?: listOf("su")
+        val args = if (suStyle == "toybox") su + listOf("0", "sh", "-c", cmd) else su + listOf("-c", cmd)
+        return Runtime.getRuntime().exec(args.toTypedArray())
+    }
 
     private fun dump(pkg: String) {
         val useRoot = !forceNoRoot && (rootAvailable || findSu()!=null)
@@ -93,10 +103,20 @@ class MainActivity : AppCompatActivity() {
             val log: String
             if (useRoot) {
                 runOnUiThread { try { pm.getLaunchIntentForPackage(pkg)?.let { startActivity(it) } } catch(_:Exception){} }
-                Thread.sleep(22000)
+                Thread.sleep(25000)
                 val bin = File(applicationInfo.nativeLibraryDir, "libdd.so").absolutePath
                 var l=""
-                for (a in 1..2) { val p=runSu("$bin $pkg ${out.absolutePath}"); l=(p.inputStream.bufferedReader().readText()+p.errorStream.bufferedReader().readText()).trim(); p.waitFor(); if (l.contains("DARKDEX_DONE")) break; Thread.sleep(10000) }
+                for (a in 1..3) {
+                    val p=runSu("$bin $pkg ${out.absolutePath}")
+                    var errText=""
+                    val errThread=Thread { errText=p.errorStream.bufferedReader().readText() }.also { it.start() }
+                    val outText=p.inputStream.bufferedReader().readText()
+                    errThread.join()
+                    p.waitFor()
+                    l=(outText+errText).trim()
+                    if (l.contains("DARKDEX_DONE")) break
+                    Thread.sleep(12000)
+                }
                 log="(via ${suCmd?.joinToString(" ")})\n$l"
             } else log = extractNoRoot(pkg, out)
             val dex = out.listFiles { f -> f.name.endsWith(".dex") }?.size ?: 0
