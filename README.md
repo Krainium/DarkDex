@@ -93,13 +93,12 @@ the full writeup is in [ijiami.md](ijiami.md).
 
 ## 📸 screens
 
-✨ splash
-
-![splash](docs/splash.png)
-
-📲 app with the root badge, search box and toggle
-
-![app](docs/app.png)
+<table>
+<tr>
+<td align="center">✨ splash<br><img src="docs/splash.png"/></td>
+<td align="center">📲 app — root badge, search, toggle<br><img src="docs/app.png"/></td>
+</tr>
+</table>
 
 🧩 dump result with the mode badge
 
