@@ -1,65 +1,76 @@
 #!/usr/bin/env bpftrace
-/*
- * darkdex v2 — JIT-release tracer (kernel-side, sandbox-invisible)
- *
- * Sets uprobes on the ART dex-open path from the HOST kernel. Runs outside the
- * Android sandbox (no ptrace, no frida, no in-process hook), so the packer's
- * anti-debug can't see it. Catches every dex at the exact instant ART receives
- * it, BEFORE the header is wiped, and every class as it is defined.
- *
- * Probes cover Android 11–14 ART variants. bpftrace silently skips probes
- * whose symbol doesn't exist in the target library, so all overloads can
- * coexist safely — only the ones present in the running ART will attach.
- *
- * Placeholders @LIBDEX@ @LIBART@ are filled by host/darkdex.sh.
- * Events are consumed by darkdex_grab, which reads /proc/<pid>/mem at
- * (base,size) and writes a clean dex — capturing it while it is still valid.
- */
 
-/* NB: no BEGIN probe — on some redroid-host kernels bpftrace's BEGIN uses a
- * uprobe on /proc/self/exe:BEGIN_trigger that fails to resolve and aborts the
- * whole script. No comm/pid predicate either — ART loads dex on worker threads
- * and packers respawn with new pids, so any static filter drops events. We
- * capture every ART dex-open and let darkdex_grab filter by cmdline. */
-
-/* --- DexFileLoader::OpenCommon --- */
-
-/* Android 11–14: OpenCommon(const uint8_t* base, size_t size, ...) */
 uprobe:@LIBDEX@:_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE
 {
   printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg0, (uint64)arg1);
 }
 
-/* Android 14+: OpenCommon(shared_ptr<DexFileContainer>, const uint8_t* base, size_t size, ...) */
 uprobe:@LIBDEX@:_ZN3art13DexFileLoader10OpenCommonENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileEbbPSC_PNS_22DexFileLoaderErrorCodeE
 {
   printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
 }
 
-/* --- ArtDexFileLoader::Open (Android 14 high-level entry) --- */
-
-/* Open(const uint8_t* base, size_t size, ...) */
 uprobe:@LIBDEX@:_ZNK3art16ArtDexFileLoader4OpenEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEE
 {
   printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
 }
 
-/* --- CompactDexFile constructors --- */
+uprobe:@LIBDEX@:_ZNK3art16ArtDexFileLoader4OpenEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_PSt10unique_ptrIKNS_7DexFileESt14default_deleteISF_EE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
 
-/* Android 11: CompactDexFile(this, base, size, data_base, data_size, ...) */
+uprobe:@LIBDEX@:_ZNK3art16ArtDexFileLoader10OpenCommonENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileEbbPSC_PNS_22DexFileLoaderErrorCodeE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
+uprobe:@LIBDEX@:_ZNK3art16ArtDexFileLoader10OpenCommonEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_22DexFileLoaderErrorCodeE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg0, (uint64)arg1);
+}
+
+uprobe:@LIBDEX@:_ZN3art15StandardDexFileC2EPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10shared_ptrINS_16DexFileContainerEEE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
+uprobe:@LIBDEX@:_ZN3art15StandardDexFileC1EPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10shared_ptrINS_16DexFileContainerEEE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
 uprobe:@LIBDEX@:_ZN3art14CompactDexFileC2EPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISG_EEEE
 {
   printf("CDEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
 }
 
-/* Android 14: CompactDexFile(base, size, string, checksum, OatDexFile*, shared_ptr<Container>) */
 uprobe:@LIBDEX@:_ZN3art14CompactDexFileC2EPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10shared_ptrINS_16DexFileContainerEEE
 {
-  printf("CDEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg0, (uint64)arg1);
+  printf("CDEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
 }
 
-/* --- ClassLinker::DefineClass (stable across 11–14) --- */
+uprobe:@LIBDEX@:_ZN3art14CompactDexFileC1EPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileENS3_10shared_ptrINS_16DexFileContainerEEE
+{
+  printf("CDEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
+uprobe:@LIBDEX@:_ZN3art7DexFile10OpenMemoryEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEPPKS6_
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg0, (uint64)arg1);
+}
+
+uprobe:@LIBDEX@:_ZN3art7DexFile10OpenMemoryENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileE
+{
+  printf("DEXOPEN pid=%d base=%lx size=%lu\n", pid, (uint64)arg1, (uint64)arg2);
+}
+
 uprobe:@LIBART@:_ZN3art11ClassLinker11DefineClassEPNS_6ThreadEPKcmNS_6HandleINS_6mirror11ClassLoaderEEERKNS_7DexFileERKNS_3dex8ClassDefE
+{
+  printf("CLASS pid=%d name=%s\n", pid, str(arg2));
+}
+
+uprobe:@LIBART@:_ZN3art11ClassLinker11DefineClassEPNS_6ThreadEPKcmNS_6HandleINS_6mirror11ClassLoaderEEERKNS_7DexFileERKNS_3dex8ClassDefENS_6ObjPtrINS5_5ClassEEE
 {
   printf("CLASS pid=%d name=%s\n", pid, str(arg2));
 }
