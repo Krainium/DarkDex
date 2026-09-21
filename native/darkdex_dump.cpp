@@ -39,15 +39,19 @@ static int find_pid(const char*pkg){DIR*d=opendir("/proc");if(!d)return -1;diren
 static std::vector<Region> read_maps(int pid){std::vector<Region> v;char p[64];snprintf(p,64,"/proc/%d/maps",pid);
  FILE*f=fopen(p,"r");if(!f)return v;char line[1024];
  while(fgets(line,sizeof line,f)){uint64_t s,e;char pm[8]={0},nm[512]={0};
-  int m=sscanf(line,"%lx-%lx %7s %*x %*s %*d %511[^\n]",&s,&e,pm,nm);
+  int m=sscanf(line,"%llx-%llx %7s %*x %*s %*d %511[^\n]",(unsigned long long*)&s,(unsigned long long*)&e,pm,nm);
   if(m>=3){Region r;r.s=s;r.e=e;r.r=pm[0]=='r';r.x=pm[2]=='x';r.tag=(m>=4?nm:"");v.push_back(r);} }
  fclose(f);return v;}
 static bool urlc(uint8_t c){return c>0x20&&c<0x7f&&c!='"'&&c!='\''&&c!='<'&&c!='>'&&c!='\\'&&c!=')'&&c!='(';}
 static uint32_t carve_size(const uint8_t*p,size_t a){if(a<0x70)return 0;if(*(uint32_t*)(p+40)!=0x12345678u)return 0;
  uint32_t fs=*(uint32_t*)(p+32),hs=*(uint32_t*)(p+36);if(hs<0x28||hs>0x200)return 0;if(fs<hs||fs>96u*1024*1024)return 0;return fs;}
 static bool inreadable(const std::vector<Region>&R,uint64_t a,uint64_t n){for(auto&r:R)if(r.r&&a>=r.s&&a+n<=r.e)return true;return false;}
+static bool spans_readable(const std::vector<Region>&R,uint64_t a,uint64_t need){
+ if(inreadable(R,a,need))return true;uint64_t end=a+need,cur=a;
+ for(auto&r:R){if(!r.r)continue;if(r.s>cur)return false;if(r.s<=cur&&r.e>cur){cur=r.e;if(cur>=end)return true;}}return false;}
 static bool inlibcode(const std::vector<Region>&R,uint64_t a){for(auto&r:R)if(r.x&&a>=r.s&&a<r.e&&
- (r.tag.find("libdexfile.so")!=std::string::npos||r.tag.find("libart.so")!=std::string::npos))return true;return false;}
+ (r.tag.find("libdexfile.so")!=std::string::npos||r.tag.find("libart.so")!=std::string::npos||
+  r.tag.find("libdexfile_external.so")!=std::string::npos))return true;return false;}
 
 int main(int argc,char**argv){
  if(argc<3){fprintf(stderr,"usage: %s <package> <outdir>\n",argv[0]);return 1;}
@@ -63,12 +67,18 @@ int main(int argc,char**argv){
 
  for(auto&r:R){
   if(!r.r)continue;uint64_t sz=r.e-r.s;if(sz==0||sz>900ULL*1024*1024)continue;
-  buf.resize(sz);ssize_t n=pread(fd,buf.data(),sz,r.s);if(n<=0)continue;const uint8_t*B=buf.data();
+  buf.resize(sz);ssize_t n=pread(fd,buf.data(),sz,(off_t)r.s);if(n<=(ssize_t)0)continue;const uint8_t*B=buf.data();
 
-  // 1. carve
+  // 1. carve (cross-region aware)
   for(size_t i=0;i+0x70<=(size_t)n;i+=4){
-   if(*(uint32_t*)(B+i+40)!=0x12345678u)continue;uint32_t ds=carve_size(B+i,n-i);if(!ds||i+ds>(size_t)n)continue;
-   const uint8_t*bl=B+i;bool cd=(!memcmp(bl,CDEXM,4))||(*(uint32_t*)(bl+36)!=0x70);
+   if(*(uint32_t*)(B+i+40)!=0x12345678u)continue;uint32_t ds=carve_size(B+i,n-i);if(!ds)continue;
+   std::vector<uint8_t> xbuf;const uint8_t*bl;
+   if(i+ds>(size_t)n){
+    xbuf.resize(ds);memcpy(xbuf.data(),B+i,n-i);size_t got=n-i;uint64_t addr=r.s+n;
+    while(got<ds){ssize_t rd=pread(fd,xbuf.data()+got,ds-got,(off_t)addr);if(rd<=0)break;got+=rd;addr+=rd;}
+    if(got<ds)continue;bl=xbuf.data();
+   }else{bl=B+i;}
+   bool cd=(!memcmp(bl,CDEXM,4))||(*(uint32_t*)(bl+36)!=0x70);
    std::string k=std::to_string(ds)+":";k.append((char*)bl+12,16);if(seenC.count(k)){i+=ds-4;continue;}seenC.insert(k);
    std::vector<uint8_t> o(bl,bl+ds);if(memcmp(o.data(),DEXM,4)&&memcmp(o.data(),CDEXM,4))memcpy(o.data(),cd?"cdex001":"dex\n035",7);
    char op[640];snprintf(op,640,"%s/carve_%02d_%s.%s",out,dex,cd?"cdex":"dex",cd?"cdex":"dex");FILE*of=fopen(op,"wb");
@@ -95,22 +105,31 @@ int main(int argc,char**argv){
    *(uint32_t*)(H+104)=fsz>doff?fsz-doff:0;*(uint32_t*)(H+108)=doff;
    char op[640];snprintf(op,640,"%s/recovered_%02d.dex",out,rec);FILE*of=fopen(op,"wb");if(of){fwrite(dx.data(),1,fsz,of);fclose(of);rec++;}i+=12;
   }
-  // 3. artwalk — live art::DexFile objects (v2): [vptr][begin_][size_] ...
+  // 3. artwalk — live art::DexFile objects: [vptr][begin_][size_] ...
+  // try begin_off=8 (Android <=12) and begin_off=16 (Android 13+, container_ added)
   if(r.tag.find(".so")==std::string::npos&&r.tag.find(".oat")==std::string::npos&&
      r.tag.find(".art")==std::string::npos&&r.tag.find(".vdex")==std::string::npos){
+   static const int BOFFS[]={8,16};
    for(size_t i=0;i+0x28<=(size_t)n;i+=8){
-    uint64_t vptr=*(uint64_t*)(B+i),begin=*(uint64_t*)(B+i+8),size=*(uint64_t*)(B+i+16);
-    if(!vptr||!begin||size<0x70||size>256ULL*1024*1024)continue;
-    if(!inlibcode(R,vptr)||!inreadable(R,begin,size)||seenA.count(begin))continue;
-    uint8_t hdr[0x70];if(pread(fd,hdr,0x70,begin)!=0x70)continue;
-    bool sig=!memcmp(hdr,"dex\n",4)||!memcmp(hdr,"cdex",4);bool tag=*(uint32_t*)(hdr+40)==0x12345678u;
-    uint32_t fs=*(uint32_t*)(hdr+32);if(!(sig||tag||(fs>0x70&&fs<=size+0x10000)))continue;
-    std::vector<uint8_t> dx(size);if(pread(fd,dx.data(),size,begin)!=(ssize_t)size)continue;
-    bool cd=!memcmp(dx.data(),CDEXM,4)||(*(uint32_t*)(dx.data()+36)!=0x70&&!sig);
-    if(memcmp(dx.data(),DEXM,4)&&memcmp(dx.data(),CDEXM,4))memcpy(dx.data(),cd?"cdex001\0":"dex\n035\0",8);
-    seenA.insert(begin);
-    char op[640];snprintf(op,640,"%s/artwalk_%02d_%s.%s",out,art,cd?"cdex":"dex",cd?"cdex":"dex");
-    FILE*of=fopen(op,"wb");if(of){fwrite(dx.data(),1,size,of);fclose(of);art++;}i+=8;
+    uint64_t vptr=*(uint64_t*)(B+i);
+    if(!vptr||!inlibcode(R,vptr))continue;
+    for(int boff:BOFFS){
+     uint64_t begin=*(uint64_t*)(B+i+boff),size=*(uint64_t*)(B+i+boff+8);
+     if(!begin||size<0x70||size>256ULL*1024*1024||begin+size<=begin)continue;
+     if(!inreadable(R,begin,0x70)||!spans_readable(R,begin,size)||seenA.count(begin))continue;
+     uint8_t hdr[0x70];if(pread(fd,hdr,0x70,(off_t)begin)!=0x70)continue;
+     bool sig=!memcmp(hdr,"dex\n",4)||!memcmp(hdr,"cdex",4);bool tag=*(uint32_t*)(hdr+40)==0x12345678u;
+     uint32_t fs=*(uint32_t*)(hdr+32);if(!(sig||tag||(fs>0x70&&fs<=size+0x10000)))continue;
+     std::vector<uint8_t> dx(size);size_t got=0;uint64_t addr=begin;
+     while(got<size){ssize_t rd2=pread(fd,dx.data()+got,size-got,(off_t)addr);if(rd2<=0)break;got+=rd2;addr+=rd2;}
+     if(got<size)continue;
+     bool cd=!memcmp(dx.data(),CDEXM,4)||(*(uint32_t*)(dx.data()+36)!=0x70&&!sig);
+     if(memcmp(dx.data(),DEXM,4)&&memcmp(dx.data(),CDEXM,4))memcpy(dx.data(),cd?"cdex001\0":"dex\n035\0",8);
+     seenA.insert(begin);
+     char op[640];snprintf(op,640,"%s/artwalk_%02d_%s_%llx.%s",out,art,cd?"cdex":"dex",(unsigned long long)begin,cd?"cdex":"dex");
+     FILE*of=fopen(op,"wb");if(of){fwrite(dx.data(),1,size,of);fclose(of);art++;}
+     i+=8;break;
+    }
    }
   }
   // 4. intel

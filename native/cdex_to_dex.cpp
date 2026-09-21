@@ -31,19 +31,20 @@
 
 namespace darkdex {
 
-static uint32_t rd_uleb(const uint8_t*& p){
-    uint32_t r=*p++; if(r<=0x7f) return r; r&=0x7f;
-    uint32_t c=*p++; r|=(c&0x7f)<<7; if(c<=0x7f) return r;
-    c=*p++; r|=(c&0x7f)<<14; if(c<=0x7f) return r;
-    c=*p++; r|=(c&0x7f)<<21; if(c<=0x7f) return r;
+static uint32_t rd_uleb(const uint8_t*& p, const uint8_t* end){
+    if(p>=end) return 0;
+    uint32_t r=*p++; if(r<=0x7f||p>=end) return r&0x7f; r&=0x7f;
+    uint32_t c=*p++; r|=(c&0x7f)<<7; if(c<=0x7f||p>=end) return r;
+    c=*p++; r|=(c&0x7f)<<14; if(c<=0x7f||p>=end) return r;
+    c=*p++; r|=(c&0x7f)<<21; if(c<=0x7f||p>=end) return r;
     c=*p++; r|=(c&0x7f)<<28; return r;
 }
 static void wr_uleb(std::vector<uint8_t>& o, uint32_t v){
     do { uint8_t b=v&0x7f; v>>=7; if(v) b|=0x80; o.push_back(b); } while(v);
 }
-static int32_t rd_sleb(const uint8_t*& p){
-    int32_t r=0; int sh=0; uint8_t b;
-    do { b=*p++; r|=(int32_t)(b&0x7f)<<sh; sh+=7; } while(b&0x80);
+static int32_t rd_sleb(const uint8_t*& p, const uint8_t* end){
+    int32_t r=0; int sh=0; uint8_t b=0;
+    do { if(p>=end) return r; b=*p++; r|=(int32_t)(b&0x7f)<<sh; sh+=7; } while(b&0x80);
     if(sh<32 && (b&0x40)) r|=-(1<<sh);
     return r;
 }
@@ -65,8 +66,8 @@ enum { kPreReg=0x1,kPreIns=0x2,kPreOuts=0x4,kPreTries=0x8,kPreInsns=0x10 };
 struct Code { uint16_t regs,ins,outs,tries; uint32_t insns; const uint16_t* insns_ptr; };
 
 // Decode a CompactDex code item at `ci`. Returns bytes consumed by insns start.
-static bool decode_compact(const uint16_t* ci, const uint16_t* limit, Code& c){
-    if(ci+2>limit) return false;
+static bool decode_compact(const uint16_t* ci, const uint16_t* start, const uint16_t* limit, Code& c){
+    if(ci+2>limit||ci<start) return false;
     uint16_t fields = ci[0];
     uint16_t icf    = ci[1];
     uint16_t flags  = icf & 0x1F;
@@ -77,11 +78,11 @@ static bool decode_compact(const uint16_t* ci, const uint16_t* limit, Code& c){
     c.insns = icf >> kInsnsShift;
     // preheader: uint16s just before ci, consumed low-flag-first
     const uint16_t* pre = ci;
-    if(flags & kPreReg)   c.regs  += *--pre;
-    if(flags & kPreIns)   c.ins   += *--pre;
-    if(flags & kPreOuts)  c.outs  += *--pre;
-    if(flags & kPreTries) c.tries += *--pre;
-    if(flags & kPreInsns){ uint32_t hi=*--pre; c.insns += hi<<16; }  // insns high bits
+    if(flags & kPreReg)   { if(pre<=start) return false; c.regs  += *--pre; }
+    if(flags & kPreIns)   { if(pre<=start) return false; c.ins   += *--pre; }
+    if(flags & kPreOuts)  { if(pre<=start) return false; c.outs  += *--pre; }
+    if(flags & kPreTries) { if(pre<=start) return false; c.tries += *--pre; }
+    if(flags & kPreInsns) { if(pre<=start) return false; uint32_t hi=*--pre; c.insns += hi<<16; }
     c.insns_ptr = ci+2;
     if(c.insns_ptr + c.insns > limit) return false;
     return true;
@@ -90,12 +91,12 @@ static bool decode_compact(const uint16_t* ci, const uint16_t* limit, Code& c){
 // length in bytes of an encoded_catch_handler_list starting at p (bounded by end)
 static size_t handlers_len(const uint8_t* p, const uint8_t* end){
     const uint8_t* s=p; if(p>=end) return 0;
-    uint32_t list_size = rd_uleb(p);
+    uint32_t list_size = rd_uleb(p,end);
     for(uint32_t i=0;i<list_size && p<end;i++){
-        int32_t sz = rd_sleb(p);
+        int32_t sz = rd_sleb(p,end);
         uint32_t n = sz<0 ? (uint32_t)(-sz) : (uint32_t)sz;
-        for(uint32_t j=0;j<n && p<end;j++){ rd_uleb(p); rd_uleb(p); }  // type_idx, addr
-        if(sz<=0){ rd_uleb(p); }                                       // catch_all addr
+        for(uint32_t j=0;j<n && p<end;j++){ rd_uleb(p,end); rd_uleb(p,end); }  // type_idx, addr
+        if(sz<=0 && p<end){ rd_uleb(p,end); }                                   // catch_all addr
     }
     return (size_t)(p-s);
 }
@@ -103,9 +104,10 @@ static size_t handlers_len(const uint8_t* p, const uint8_t* end){
 // Expand one method's code, append standard code_item to `out`, return new offset.
 static uint32_t emit_std_code(std::vector<uint8_t>& out, const uint8_t* codeBase,
                               const uint8_t* codeEnd, uint32_t cdex_off){
+    if((size_t)cdex_off+4 > (size_t)(codeEnd-codeBase)) return 0;
     const uint16_t* ci = (const uint16_t*)(codeBase + cdex_off);
     Code c;
-    if(!decode_compact(ci,(const uint16_t*)codeEnd,c)) return 0;
+    if(!decode_compact(ci,(const uint16_t*)codeBase,(const uint16_t*)codeEnd,c)) return 0;
     while(out.size() & 3) out.push_back(0);                // 4-byte align
     uint32_t noff = (uint32_t)out.size();
     auto pu2=[&](uint16_t v){ out.push_back(v&0xff); out.push_back(v>>8); };
@@ -143,22 +145,26 @@ int convert(const uint8_t* cdex, size_t len, std::vector<uint8_t>& dexOut,
     uint32_t base = (uint32_t)dexOut.size();
 
     uint32_t cdefs = h->cdefs_sz, cdefs_off=h->cdefs_off;
+    if(cdefs_off >= (uint32_t)len || (uint64_t)cdefs_off + (uint64_t)cdefs*32 > len) return -4;
     int methods=0, expanded=0;
     for(uint32_t ci=0; ci<cdefs; ci++){
+        if(cdefs_off + (size_t)ci*32 + 28 >= dexOut.size()) continue;
         uint8_t* cd = dexOut.data() + cdefs_off + (size_t)ci*32;
         uint32_t class_data_off = *(uint32_t*)(cd+24);
         if(!class_data_off || class_data_off>=len) continue;
         const uint8_t* p = cdex + class_data_off;
         const uint8_t* pend = cdex + len;
 
-        uint32_t sf=rd_uleb(p), inf=rd_uleb(p), dm=rd_uleb(p), vm=rd_uleb(p);
+        uint32_t sf=rd_uleb(p,pend), inf=rd_uleb(p,pend), dm=rd_uleb(p,pend), vm=rd_uleb(p,pend);
+        if(p>pend) continue;
         std::vector<uint8_t> nb;                       // new class_data
         wr_uleb(nb,sf); wr_uleb(nb,inf); wr_uleb(nb,dm); wr_uleb(nb,vm);
         // fields copied unchanged
-        for(uint32_t i=0;i<sf+inf;i++){ uint32_t d=rd_uleb(p),a=rd_uleb(p); wr_uleb(nb,d); wr_uleb(nb,a); }
+        for(uint32_t i=0;i<sf+inf;i++){ if(p>=pend) break; uint32_t d=rd_uleb(p,pend),a=rd_uleb(p,pend); wr_uleb(nb,d); wr_uleb(nb,a); }
         // methods: rewrite code_off
         for(uint32_t i=0;i<dm+vm;i++){
-            uint32_t d=rd_uleb(p), a=rd_uleb(p), co=rd_uleb(p);
+            if(p>=pend) break;
+            uint32_t d=rd_uleb(p,pend), a=rd_uleb(p,pend), co=rd_uleb(p,pend);
             uint32_t nco=0;
             if(co){ methods++;
                 uint32_t e=emit_std_code(dexOut, codeBase, codeEnd, co);
