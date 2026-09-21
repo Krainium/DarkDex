@@ -1,29 +1,3 @@
-// darkdex v2 — ART DexFile-object walker
-//
-// carve() trusts the dex header; recover() trusts the map_list. A packer that
-// wipes BOTH defeats them. But ART itself keeps the truth: every loaded dex has
-// a live `art::DexFile` object on the heap whose members store the real
-// begin_/size_ (and data_begin_/data_size_) independently of the on-disk header.
-//
-// This walks the heap for those objects and dumps each dex by its object-recorded
-// bounds — so even a fully header+maplist-wiped dex comes out with correct size.
-//
-// Layouts (arm64, art::DexFile — vtable at offset 0):
-//
-//   Android 11:                      Android 14:
-//   +0x00 vtable*                    +0x00 vtable*
-//   +0x08 begin_                     +0x08 begin_
-//   +0x10 size_                      +0x10 size_
-//   +0x18 data_begin_                +0x18 data_begin_
-//   +0x20 data_size_                 +0x20 data_size_
-//                                    +0x28 container_ (shared_ptr, 16 bytes)
-//                                    +0x38 location_  (string, 24–32 bytes)
-//
-// The first 5 fields are identical across 11–14. The difference is in fields
-// AFTER data_size_ which we don't read — so one scan covers both versions.
-// Confirmation: vtable in libart/libdexfile code, begin_ in readable memory,
-// dex/cdex magic or endian tag present, size_ sane. Cross-region reads handle
-// dex that spans multiple mmap regions.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -75,46 +49,91 @@ static bool in_libcode(const std::vector<Region>&R,uint64_t a){
     return false;
 }
 
+static std::vector<std::pair<uint64_t,uint64_t>> load_locs(const char* path){
+    std::vector<std::pair<uint64_t,uint64_t>> v;
+    FILE* f=fopen(path,"r"); if(!f) return v;
+    unsigned long base; size_t size;
+    while(fscanf(f,"%lx %zu",&base,&size)==2) v.push_back({(uint64_t)base,(uint64_t)size});
+    fclose(f); return v;
+}
+
+static int calibrate_begin_offset(int fd, const std::vector<Region>& R,
+                                   const std::vector<std::pair<uint64_t,uint64_t>>& locs){
+    if(locs.empty()) return -1;
+    int hits8=0, hits16=0;
+    for(auto& r : R){
+        if(!r.r) continue;
+        if(r.tag.find(".so")!=std::string::npos||r.tag.find(".oat")!=std::string::npos) continue;
+        uint64_t sz=r.e-r.s; if(sz==0||sz>64ULL*1024*1024) continue;
+        std::vector<uint8_t> buf(sz);
+        if(pread(fd,buf.data(),sz,(off_t)r.s)<=0) continue;
+        const uint8_t* B=buf.data();
+        for(size_t i=0;i+0x28<=sz;i+=8){
+            uint64_t v8 =*(const uint64_t*)(B+i+8);
+            uint64_t v16=*(const uint64_t*)(B+i+16);
+            for(auto& [base,size]: locs){
+                if(v8 ==base) hits8++;
+                if(v16==base) hits16++;
+            }
+        }
+        if(hits8>0||hits16>0) break;
+    }
+    if(hits8>hits16) return 8;
+    if(hits16>hits8) return 16;
+    return -1;
+}
+
 int main(int argc,char**argv){
-    if(argc<3){ fprintf(stderr,"usage: darkdex_artwalk <hostpid|pkg> <outdir>\n"); return 1; }
+    if(argc<3){ fprintf(stderr,"usage: darkdex_artwalk <hostpid|pkg> <outdir> [--calibrate <locs.txt>]\n"); return 1; }
     int pid=atoi(argv[1]); if(pid<=0) pid=find_pid(argv[1]);
     if(pid<=0){ fprintf(stderr,"[artwalk] target not found\n"); return 1; }
     const char* outdir=argv[2];
+
+    std::vector<std::pair<uint64_t,uint64_t>> calib_locs;
+    for(int i=3;i<argc-1;i++){
+        if(!strcmp(argv[i],"--calibrate")) calib_locs=load_locs(argv[i+1]);
+    }
     char mp[64]; snprintf(mp,sizeof mp,"/proc/%d/mem",pid); int fd=open(mp,O_RDONLY);
     if(fd<0){ perror("[artwalk] open mem"); return 1; }
     auto R=maps(pid);
     printf("[artwalk] pid %d — scanning heap for art::DexFile objects\n",pid);
+
+    int begin_off = 8;
+    if(!calib_locs.empty()){
+        int det = calibrate_begin_offset(fd, R, calib_locs);
+        if(det > 0){ begin_off = det; printf("[artwalk] calibrated begin_ offset: +%d\n",begin_off); }
+        else printf("[artwalk] calibration inconclusive; using default offset +%d\n",begin_off);
+    }
 
     auto rd=[&](uint64_t a,void*b,size_t n){ return pread(fd,b,n,(off_t)a)==(ssize_t)n; };
     std::set<uint64_t> dumped; std::vector<uint8_t> buf; int found=0;
 
     for(auto&r:R){
         if(!r.r) continue;
-        // objects live in anon/heap/dalvik regions, not in file-backed code
         if(r.tag.find(".so")!=std::string::npos||r.tag.find(".oat")!=std::string::npos||
            r.tag.find(".art")!=std::string::npos||r.tag.find(".vdex")!=std::string::npos) continue;
         uint64_t sz=r.e-r.s; if(sz==0||sz>512ULL*1024*1024) continue;
-        buf.resize(sz); if(pread(fd,buf.data(),sz,(off_t)r.s)<=0) continue;
+        buf.resize(sz); if(pread(fd,buf.data(),sz,(off_t)r.s)!=(ssize_t)sz) continue;
         const uint8_t* B=buf.data();
         for(size_t i=0;i+0x28<=sz;i+=8){
             uint64_t vptr=*(const uint64_t*)(B+i);
-            uint64_t begin=*(const uint64_t*)(B+i+8);
-            uint64_t size =*(const uint64_t*)(B+i+16);
+            uint64_t begin=*(const uint64_t*)(B+i+begin_off);
+            uint64_t size =*(const uint64_t*)(B+i+begin_off+8);
             if(!vptr||!begin) continue;
             if(size<0x70||size>256ULL*1024*1024) continue;
-            if(!in_libcode(R,vptr)) continue;                 // vtable must be in libart/libdexfile
+            if(begin + size <= begin) continue;
+            if(!in_libcode(R,vptr)) continue;
             if(!in_readable(R,begin,0x70)) continue;
-            if(!spans_readable(R,begin,size)) continue;       // dex may span multiple regions
+            if(!spans_readable(R,begin,size)) continue;
             if(dumped.count(begin)) continue;
 
             uint8_t hdr[0x70]; if(!rd(begin,hdr,0x70)) continue;
             bool sig = !memcmp(hdr,"dex\n",4)||!memcmp(hdr,"cdex",4);
-            bool tag = *(const uint32_t*)(hdr+40)==0x12345678u;   // endian_tag survives most wipes
+            bool tag = *(const uint32_t*)(hdr+40)==0x12345678u;
             uint32_t fsz = *(const uint32_t*)(hdr+32);
             bool plausible = sig || tag || (fsz>0x70 && fsz<=size+0x10000);
             if(!plausible) continue;
 
-            // cross-region read: pread handles contiguous VA even across mmap boundaries
             std::vector<uint8_t> dex(size);
             size_t got=0; uint64_t addr=begin;
             while(got<size){
