@@ -89,16 +89,17 @@ open DarkDex, pick an app from the list, and it dumps. on a rooted device or emu
 
 ## 🔧 how it works
 
-the full writeup is in ijiami.md.
+the full writeup is in [ijiami.md](ijiami.md).
 
 ## 📸 screens
 
-<table>
-<tr>
-<td align="center">✨ splash<br><img src="docs/splash.png"/></td>
-<td align="center">📲 app — root badge, search, toggle<br><img src="docs/app.png"/></td>
-</tr>
-</table>
+✨ splash
+
+![splash](docs/splash.png)
+
+📲 app with the root badge, search box and toggle
+
+![app](docs/app.png)
 
 🧩 dump result with the mode badge
 
