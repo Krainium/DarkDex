@@ -10,6 +10,12 @@ it comes in two parts.
 
 📱 darkdex.apk runs on the phone or emulator itself. root mode does a full memory dump. no root mode pulls the on disk dex.
 
+## 🆕 v2.2: stability and android 13
+
+- 🛡️ **cdex_to_dex bounds fix**. ULEB128/SLEB128 reads were unbounded — any malformed carved cdex caused a SIGSEGV. all reads are now end-guarded; decode_compact has a start lower-bound.
+- 🔬 **artwalk android 13**. `begin_` field moved to offset 16 due to a new `container_` shared_ptr. artwalk now probes both offset 8 and 16 so it works on android 11–13.
+- 🔑 **darkdex_sym**. new host tool (`host/darkdex_sym.sh`) resolves ART symbol offsets from the running redroid libart.so so you do not need to hardcode them per build.
+
 ## 🆕 v2: event driven capture
 
 v1 took one memory snapshot. v2 adds four things, all still from **outside** the sandbox (invisible to ijiami anti debug). full writeup in [V2.md](V2.md).
@@ -75,6 +81,13 @@ grab the apk from the releases page and install it
 
 ```
 adb install -r -g darkdex.apk
+```
+
+or download v2.2 directly
+
+```
+wget https://github.com/Krainium/DarkDex/releases/download/v2.2/darkdex-v2.2.apk
+adb install -r -g darkdex-v2.2.apk
 ```
 
 or build it yourself
