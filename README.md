@@ -10,6 +10,12 @@ it comes in two parts.
 
 📱 darkdex.apk runs on the phone or emulator itself. root mode does a full memory dump. no root mode pulls the on disk dex.
 
+## 🆕 v2.2: stability fixes
+
+- 🛡️ **cdex_to_dex bounds fix**. `rd_uleb` / `rd_sleb` now carry an end pointer — malformed carved cdex no longer segfaults the engine.
+- 🔧 **artwalk Android 13 support**. tries `begin_` at offset 8 and 16 so `art::DexFile` objects are found on both pre-13 and post-13 ART layouts (container_ field shift).
+- 🧰 **darkdex_sym host tool**. generates per-device bpftrace files by resolving symbols live from the container ART libs — handles absent probes cleanly.
+
 ## 🆕 v2: event driven capture
 
 v1 took one memory snapshot. v2 adds four things, all still from **outside** the sandbox (invisible to ijiami anti debug). full writeup in [V2.md](V2.md).
@@ -69,12 +75,13 @@ run it. pass an apk and it installs it for you, or pass a package that is alread
 
 dumps land in dumps/<package>/ with the carved dex, the recovered dex, and an intel file with the backend urls, the class map and the packer id.
 
-### 📱 the app (darkdex.apk)
+### 📱 the app (darkdex-v2.2.apk)
 
 grab the apk from the releases page and install it
 
 ```
-adb install -r -g darkdex.apk
+wget https://github.com/Krainium/DarkDex/releases/download/v2.2/darkdex-v2.2.apk
+adb install -r -g darkdex-v2.2.apk
 ```
 
 or build it yourself
