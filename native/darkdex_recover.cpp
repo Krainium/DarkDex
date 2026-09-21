@@ -29,20 +29,18 @@ int main(int argc,char**argv){
     char mp[256]; snprintf(mp,256,"/proc/%d/mem",pid); int fd=open(mp,O_RDONLY); if(fd<0){perror("mem");return 1;}
     char mpath[256]; snprintf(mpath,256,"/proc/%d/maps",pid); FILE* mf=fopen(mpath,"r"); if(!mf)return 1;
     printf("[darkdex_recover] pid %d  — anchoring on dex map_list (header-agnostic)\n",pid);
-    std::vector<uint8_t> buf; char line[1024]; int found=0; std::set<uint32_t> seen;
+    std::vector<uint8_t> buf; char line[1024]; int found=0; std::set<uint64_t> seen;
     while(fgets(line,sizeof line,mf)){
         uint64_t s,e; char perms[8]={0}; if(sscanf(line,"%lx-%lx %7s",&s,&e,perms)!=3)continue;
         if(perms[0]!='r')continue; uint64_t sz=e-s; if(sz==0||sz>700ULL*1024*1024)continue;
         buf.resize(sz); ssize_t n=pread(fd,buf.data(),sz,s); if(n<=0)continue; const uint8_t* B=buf.data();
         for(size_t i=4;i+64<(size_t)n;i+=4){
-
             const MapItem* m0=(const MapItem*)(B+i);
             const MapItem* m1=(const MapItem*)(B+i+12);
             if(m0->type!=kHeader||m0->size!=1||m0->offset!=0||m1->type!=kStringId||m1->size==0||m1->size>2000000) continue;
             uint32_t count=*(const uint32_t*)(B+i-4); if(count<5||count>40) continue;
             if(i-4 + 4 + (size_t)count*12 > (size_t)n) continue;
-
-            uint32_t sid_s=0,sid_o=0,tid_s=0,tid_o=0,pid_s=0,pid_o=0,fid_s=0,fid_o=0,mid_s=0,mid_o=0,cd_s=0,cd_o=0,map_off=0; bool ok=true;
+            uint32_t sid_s=0,sid_o=0,tid_s=0,tid_o=0,pid_s=0,pid_o=0,fid_s=0,fid_o=0,mid_s=0,mid_o=0,cd_s=0,cd_o=0,map_off=0;
             for(uint32_t k=0;k<count;k++){ const MapItem* it=(const MapItem*)(B+i+(size_t)k*12);
                 switch(it->type){case kStringId:sid_s=it->size;sid_o=it->offset;break;case kTypeId:tid_s=it->size;tid_o=it->offset;break;
                     case kProtoId:pid_s=it->size;pid_o=it->offset;break;case kFieldId:fid_s=it->size;fid_o=it->offset;break;
@@ -53,12 +51,10 @@ int main(int argc,char**argv){
             uint64_t dex_start  = mlist_addr - map_off;
             uint32_t file_size  = map_off + 4 + count*12;
             if(dex_start < s || dex_start+file_size > e || file_size<0x70 || file_size>96u*1024*1024) continue;
-            if(seen.count((uint32_t)(dex_start - s + (s&0xffffffff)))) continue;
+            if(seen.count(dex_start)) continue;
             std::vector<uint8_t> dex(file_size);
             if(pread(fd,dex.data(),file_size,dex_start)!=(ssize_t)file_size) continue;
-
             if(want){ bool hit=false; for(size_t z=0;z+strlen(want)<file_size;z++) if(!memcmp(dex.data()+z,want,strlen(want))){hit=true;break;} if(!hit) continue; }
-
             uint8_t* H=dex.data();
             memcpy(H,"dex\n035\0",8);
             *(uint32_t*)(H+32)=file_size; *(uint32_t*)(H+36)=0x70; *(uint32_t*)(H+40)=0x12345678;
@@ -75,7 +71,7 @@ int main(int argc,char**argv){
             char op[512]; snprintf(op,512,"%s/recovered_%02d_%llx.dex",outdir,found,(unsigned long long)dex_start);
             FILE* o=fopen(op,"wb"); if(o){fwrite(dex.data(),1,file_size,o);fclose(o);
                 printf("[+] RECOVERED dex @ %llx  size %u  classes %u  -> %s\n",(unsigned long long)dex_start,file_size,cd_s,op);
-                found++; seen.insert((uint32_t)(dex_start-s+(s&0xffffffff)));}
+                found++; seen.insert(dex_start);}
             i += 12;
         }
     }
